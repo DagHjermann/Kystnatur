@@ -1,0 +1,59 @@
+---
+title: "01_stats"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Packages
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(forcats)
+library(ggeasy)
+```
+
+## Data  
+```{r}
+fn <- "data/kystnatur_statistics.xlsx"
+readxl::excel_sheets(fn)
+dat_all <- read_excel(fn)
+lookup_komm <- read_excel(fn, sheet = "kommuner") %>% 
+  rename(
+    befolkning = `Befolkning per 1.1. (personer)`,
+    kommuneareal = `Areal (km²)`)
+
+```
+
+## Stats
+```{r}
+
+
+dat_k <- dat_all %>% 
+  group_by(
+    kommunenum) %>% 
+  summarise(
+    areal_dekar = sum(area)/1000) %>% 
+  left_join(
+    lookup_komm) %>% 
+  arrange(
+    desc(areal_dekar)) %>% 
+  mutate(
+    kommunenavn = fct_inorder(kommunenavn),
+    storkommune = case_when(
+      befolkning >= 15000 ~ "Over 15000",
+      befolkning < 15000 ~ "Under 15000")
+  )
+
+ggplot(dat_k[1:50,], aes(kommunenavn, areal_dekar)) +
+  geom_col(aes(fill = storkommune)) +
+  theme_bw() +
+  easy_rotate_x_labels(angle = -45)
+
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
