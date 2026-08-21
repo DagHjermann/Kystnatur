@@ -12,40 +12,785 @@ editor_options:
 library(dplyr)
 library(ggplot2)
 library(readxl)
+library(purrr)
+library(tidyr)
 library(forcats)
 library(ggeasy)
+library(cowplot)
+
+change_colname <- function(df, a, b){
+  i <- grep(a, names(df))[1]
+  names(df)[i] <- b
+  df
+}
+
+
 ```
 
-## Data  
+## Data
+
 ```{r}
+
+#
+# a Main data (polygons for "deposition" i.e. built-out areas after 2004)
+#
+
+# reading excel causes encoding trouble!
+# fn <- "data/kystnatur_statistics.xlsx"
+# readxl::excel_sheets(fn)
+# dat_all <- read_excel(fn)
+# a <- grep("^Havne", dat_all$objtype)
+# b <- a[1]
+# dat_all$objtype[b]
+# dat_all[b,]
+# dat_all[b,1]
+
+fn <- "data/kystnatur_statistics_deposition.csv"
+dat_all <- readr::read_csv2(fn)
+
+
 fn <- "data/kystnatur_statistics.xlsx"
-readxl::excel_sheets(fn)
-dat_all <- read_excel(fn)
-lookup_komm <- read_excel(fn, sheet = "kommuner") %>% 
-  rename(
-    befolkning = `Befolkning per 1.1. (personer)`,
-    kommuneareal = `Areal (km²)`)
+
+#
+# b Kommune (area, no. of inhabitats) ----
+#
+# kommune: 
+lookup_komm <- read_excel(fn, sheet = "kommuner")
+
+lookup_komm <- change_colname(lookup_komm, "Befolkning per 1.1. (personer)", "befolkning")
+lookup_komm <- change_colname(lookup_komm, "Areal (km2)", "kommuneareal")
+
+#
+# c Hytter (cottages) ----
+#
+# 03174: Eksisterende bygningsmasse. Fritidsbygg, etter region, år og bygningstype
+# https://www.ssb.no/statbank/table/03174
+fn <- "data/ssb/03174_20260410-144751.xlsx"
+lookup_cabins <- read_excel(
+  fn, skip = 5, n_max = 357, 
+  col_names = c("kommune", "hytter", "fritidsbolig")) %>%
+  mutate(
+    kommunenum = substr(kommune, 3, 6),
+    hytter_og_fritidsboliger = hytter + fritidsbolig) 
+# lookup_cabins %>%  head()
+
+#
+# . d Næring ----
+#
+# 07984: Sysselsatte per 4. kvartal, etter region, næring (SN2007), år og alder
+# Oppdatert: 04.02.2026, 08:00
+# https://www.ssb.no/statbank/table/03174
+# also see: https://www.ssb.no/klass/sok?query=kommune&includeCodelists=false&ssbSection= 
+fn <- "data/ssb/07984_20260410-133349.xlsx"
+read_excel(fn, skip = 3)
+# lookup_work_long <- read_excel(fn, skip = 3, n_max = 6480, col_names = c("kommune", "næring", "sysselsatte_char"))
+
+lookup_work_long <- read_excel(fn, skip = 3, n_max = 6480)
+names(lookup_work_long) <- c("kommune", "naering", "sysselsatte_char")
+lookup_work_long
+
+# fill empty 'kommune' fields
+for (i in 2:nrow(lookup_work_long)){
+  if (is.na(lookup_work_long$kommune[i]))
+    lookup_work_long$kommune[i] <- lookup_work_long$kommune[i-1]
+  }
+
+lookup_work_long <- lookup_work_long %>% 
+  filter(!is.na(naering)) %>% 
+  mutate(
+    kommunenum = substr(kommune, 3, 6),
+    sysselsatte = as.numeric(sysselsatte_char),
+    sysselsatte = ifelse(is.na(sysselsatte), 0, sysselsatte)
+  )
+
+lookup_work_wide <- lookup_work_long %>% 
+  select(kommunenum, naering, sysselsatte) %>% 
+  pivot_wider(names_from = naering, values_from = sysselsatte)
+
+# add sum
+# lookup_work_wide$n_sysselsatte <- apply(lookup_work_wide[,-(1:2)], 1, sum)
+
+names(lookup_work_wide)
+lookup_work_wide <- change_colname(lookup_work_wide, "00-99 Alle n", "n_alle")
+lookup_work_wide <- change_colname(lookup_work_wide, "01-03 Jordbruk, skogbruk og fiske", "n_primaernaering")
+lookup_work_wide <- change_colname(lookup_work_wide, "05-09 Bergverksdrift og utvinning", "n_bergverk")
+lookup_work_wide <- change_colname(lookup_work_wide, "10-33 Industri", "n_industri")
+
+lookup_work <- lookup_work_wide |> 
+  mutate(
+    n_industri = n_bergverk + n_industri,
+    prosent_primaernaering = n_primaernaering/n_alle*100 %>% round(2),
+    prosent_industri = n_industri/n_alle*100 %>% round(2)
+  ) %>%
+  select(kommunenum, n_primaernaering, n_industri, n_alle, prosent_primaernaering, prosent_industri)
+
+ggplot(lookup_work, aes(prosent_primaernaering, prosent_industri)) +
+  geom_point()
 
 ```
 
-## Stats
+## Types  
+
+```{r}
+
+xtabs(~objtype, dat_all) 
+
+gg1 <- dat_all %>% 
+  count(objtype) %>% 
+  arrange(desc(n)) %>%
+  mutate(objtype = fct_inorder(objtype)) %>% 
+  ggplot(aes(objtype, n)) +
+  geom_col() +
+  easy_rotate_x_labels(-45) +
+  labs(main = "Type by number")
+
+gg2 <- dat_all %>% 
+  count(objtype, wt = area, name = "area") %>% 
+  arrange(desc(area)) %>%
+  mutate(
+    objtype = fct_inorder(objtype),
+    area = area/1E3) %>% 
+  ggplot(aes(objtype, area)) +
+  geom_col() +
+  easy_rotate_x_labels(-45) +
+  labs(main = "Type by area")
+
+# gg2
+
+plot_grid(gg1, gg2, ncol = 1)
+
+```
+
+## Area and number stats  
+
+### Total data set  
+```{r}
+
+cat("Number of structures: ")
+nrow(dat_all)
+
+cat("Combined area of structures (km2): ")
+sum(dat_all$area)/1000000
+
+```
+
+### Data excluding bridges and "harbour area polygons"  
+```{r}
+
+dat_all2 <- dat_all %>% 
+  filter(!(grepl("Bru",objtype) | grepl("Havneomr",objtype)))
+
+cat("Number of structures: ")
+nrow(dat_all2)
+
+cat("Combined area of structures (km2): ")
+sum(dat_all2$area)/1000000
+
+```
+
+## Also exclude floating piers (flytebrygge)  
+Basis for the rest of the statistics by kommune etc.  
+
+### Filter and sort
+```{r}
+
+# Filter and sort 
+dat_sort <- dat_all %>% 
+  filter(!(grepl("Bru",objtype) | grepl("Havneomr",objtype) | grepl("Flytebrygge",objtype))) %>% 
+  arrange(desc(area)) %>% 
+  mutate(cumularea = cumsum(area)/1000)
+
+# # Show and remove "Havneområde" in Sandefjord sel <- dat_sort$ID == 199033
+# dat_sort[sel,] dat_sort <- dat_sort[!sel,]
+#
+# # Remove "Havneområde" in Hammerfest #
+# https://www.norgeibilder.no/?x=819474.6622&y=7863484.4902&level=12&utm=33&projects=&layers=&plannedOmlop=0&plannedGeovekst=0
+# sel <- dat_sort$ID == 198637 dat_sort[sel,] dat_sort <- dat_sort[!sel,]
+#
+# # Remove "Havneområde" in Snefjord, Måsøy #
+# https://www.norgeibilder.no/?x=850190.8275&y=7881841.4665&level=12&utm=33&projects=&layers=&plannedOmlop=0&plannedGeovekst=0
+# sel <- dat_sort$ID == 198664 dat_sort[sel,] dat_sort <- dat_sort[!sel,]
+#
+# # Remove "Havneområde" in Havøysund, Måsøy #
+# https://www.norgeibilder.no/?x=849936.908&y=7904799.4875&level=12&utm=33&projects=&layers=&plannedOmlop=0&plannedGeovekst=0
+# sel <- dat_sort$ID == 198659 dat_sort[sel,] dat_sort <- dat_sort[!sel,]
+#
+# # Remove "Havneområde" in Havøysund, Måsøy #
+# https://www.norgeibilder.no/?x=1040129.7057&y=7902224.3643&level=12&utm=33&projects=&layers=&plannedOmlop=0&plannedGeovekst=0
+# sel <- dat_sort$ID == 198641 dat_sort[sel,] dat_sort <- dat_sort[!sel,]
+
+```
+
+### Final stats, excluding floating piers   
+```{r}
+
+cat("Number of structures: ")
+nrow(dat_sort)
+
+cat("Combined area of structures (km2): ")
+sum(dat_sort$area)/1000000
+
+```
+
+
+
+### Floating piers (flytebrygge)  
+```{r}
+
+dat_all2 <- dat_all %>% 
+  filter(grepl("Flytebrygge",objtype))
+
+cat("Number of floating piers: ")
+nrow(dat_all2)
+
+cat("Combined area of floating piers (km2): ")
+sum(dat_all2$area)/1000000
+
+rectangle_length <- dat_all2 %>% 
+  mutate(
+    side_a = side_a(area, length),
+    side_b = side_b(area, length)
+  ) |> 
+  pull(
+    side_a)
+
+cat("Combined length of floating piers (km): ")
+sum(rectangle_length, na.rm = TRUE)/1000
+
+cat("Median length of floating piers (m): ")
+median(rectangle_length, na.rm = TRUE)
+cat("Mean length of floating piers (m): ")
+mean(rectangle_length, na.rm = TRUE)
+
+
+
+
+```
+
+
+### Types  
+
+```{r}
+
+xtabs(~objtype, dat_sort) 
+
+gg1 <- dat_sort %>% 
+  count(objtype) %>% 
+  arrange(desc(n)) %>%
+  mutate(objtype = fct_inorder(objtype)) %>% 
+  ggplot(aes(objtype, n)) +
+  geom_col() +
+  easy_rotate_x_labels(-45) +
+  labs(main = "Type by number")
+
+gg2 <- dat_sort %>% 
+  count(objtype, wt = area, name = "area") %>% 
+  arrange(desc(area)) %>%
+  mutate(
+    objtype = fct_inorder(objtype),
+    area = area/1E3) %>% 
+  ggplot(aes(objtype, area)) +
+  geom_col() +
+  easy_rotate_x_labels(-45) +
+  labs(main = "Type by area")
+
+# gg2
+
+plot_grid(gg1, gg2, ncol = 1)
+
+```
+
+## Combined length all structures
+
+### Length per structure   
+Assuming structures are rectangle-shaped  
+```{r}
+
+# Example 1
+#  _ _ _ _ _ _ 
+# |           |
+# |           |
+# |_ _ _ _ _ _|
+# perimeter = 6*2 + 3*2 = 18
+# area = 6*3 = 18
+#
+# Example 2
+#  _ _ _ _ 
+# |        |
+# |        |_ _
+# |_ _ _ _  _ _|
+# perimeter (clockwise from top) = 4 + 2 + 2 + 1 + 6 + 3 = 18
+# area = 4*3 + 2*1 = 14
+#
+
+
+# areal A = a*b
+# omkrets P = 2*a + 2*b
+#         = 2*a + 2*(areal/a)
+#         = 2*a + 2*areal/a
+#         = 2*(a + areal/a)
+# a = (P/2 + sqrt((P/2)^2 - 4*A))/2
+side_a <- function(A,P) (P/2 + sqrt((P/2)^2 - 4*A))/2
+side_b <- function(A,P) (P/2 - sqrt((P/2)^2 - 4*A))/2
+# assume dimension 2 x 4, ie area = 8 and perimeter = 12
+side_a(8,12)
+side_b(8,12)
+# assume dimension 1 x 8, ie area = 8 and perimeter = 18
+side_a(8,18)
+side_b(8,18)
+# example 1 above
+side_a(18,18) # 6
+side_b(18,18) # 3
+# example 2 above
+side_a(14,18) # 7
+side_b(14,18) # 2
+# while real length is 6
+# conclusion: concave parts causes real length to be shorter than "rectangle-based" length
+
+dat_sort <- dat_sort |> 
+  mutate(
+    side_a = side_a(area, length),
+    side_b = side_b(area, length)
+  )
+
+```
+
+### Combined length and mean width of all structures
+```{r}
+
+cat("Combined length of structures (km): ")
+sum(dat_sort$side_a, na.rm = TRUE)/1000
+# 2340 km
+
+cat("Mean width of structures (m): ")
+mean(dat_sort$side_a, na.rm = TRUE)
+# 14.7 m
+
+```
+
+## Combined length, Hammerfest sample 
+
+### Check using Hammerfest    
+
+```{r}
+
+library(sf)
+check <- sf::read_sf("data/hammerfest_sjekk.gpkg")
+check
+plot(check["objtype"])
+# the whole built out area is about 5-600 meters long
+
+check$id <- 1:nrow(check) 
+plot(check["id"])
+
+# Order from largest to smallest
+order <- order(check$Shape_Area) |> rev()
+order
+
+# Plot the 12 biggest objects
+# We need to use good old base plot() and lines()
+hf_xlim <- st_bbox(check)[c(1, 3)]
+hf_ylim <- st_bbox(check)[c(2, 4)]
+order <- order(check$Shape_Area) |> rev()
+coords <- st_coordinates(check)
+par(mfrow = c(3,4), mar = c(0,0,0,0))
+for (i in 1:12){
+  # plot(check[order[i], "objtype"], xlim = hf_xlim, ylim = hf_ylim)
+  plot(0,0, type = "n", xlim = hf_xlim, ylim = hf_ylim)
+  coo <- coords[coords[,"L3"]==order[i],]
+  lines(coo[,"X"], coo[,"Y"], )
+}
+
+# Cumulative area 
+df <- check |> sf::st_drop_geometry()
+cumsum <- df |> 
+  arrange(desc(Shape_Area)) |> 
+  pull(Shape_Area) |> 
+  cumsum()
+
+# Cumulative area in percent of total
+# 5 largest = 98.8 %
+# WHich is reassuring
+cumsum/sum(df$Shape_Area)*100
+# [1]  84.46944  90.65949  94.74987  96.70993  98.35111  98.81937  99.20412  99.55998  99.77858 
+
+# Calculate ideal length of sides
+check$side_a <- side_a(check$Shape_Area, check$Shape_Leng)
+check$side_b <- side_b(check$Shape_Area, check$Shape_Leng)
+
+# Check sum
+sum(check$side_a)
+# 2289 m - seems very high, should be more like 5-600 m
+
+sum(check$side_a[check$side_b >= 2])
+# 1493
+sum(check$side_a[check$side_b >= 3])
+# 1493
+sum(check$side_a[check$side_b >= 5])
+# 1493
+sum(check$side_a[check$side_b >= 10])
+# 1244
+
+```
+
+### Merging touching polygons and calculate diameter  
+```{r}
+
+# Find polygons sharing boundaries
+nb <- st_touches(check)
+
+# Connected components
+library(igraph)
+
+g <- graph_from_adj_list(nb)
+check$cluster <- components(g)$membership
+
+# Check clusters
+plot(check["cluster"])
+
+# Dissolve by cluster
+# may need to do this: install.packages("lwgeom")
+check2 <- check |>
+  dplyr::group_by(cluster) |>
+  dplyr::summarise() |> 
+  mutate(
+    Shape_Area = st_area(geom),
+    Shape_Leng = st_perimeter(geom)
+  )
+
+# Check clusters
+plot(check2)
+
+# Check 
+check2$side_a <- side_a(check2$Shape_Area, check2$Shape_Leng)
+check2$side_b <- side_b(check2$Shape_Area, check2$Shape_Leng)
+
+sum(check2$side_a)
+# 1107 m - much better
+
+sum(check2$side_a[as.numeric(check2$Shape_Area) >= 50])
+# 1107 m - much better
+
+library(sf)
+
+# find diameter
+get_diameter <- function(poly) {
+  hull <- st_convex_hull(poly)
+  coords <- st_coordinates(hull)[, 1:2]
+  # Remove duplicated last point
+  coords <- coords[!duplicated(coords), ]
+  max(dist(coords))
+}
+
+check2$diameter <- sapply(st_geometry(check2), get_diameter)
+
+sum(check2$diameter)
+# 760 m - even better
+
+sum(check2$diameter[as.numeric(check2$Shape_Area) >= 50])
+# 621 m
+
+```
+
+## Combined length, all municipalities   
+* Estimate using 20% of municipalities   
+* Ca. 5 minutes for 20% of municipalities  
+
+```{r}
+# Connected components
+library(igraph)
+
+library(sf)
+sf_all <- sf::st_read("data/build_Construction_clip/build_Construction_clip.shp")
+table(sf_all$kommunenum) |> length()
+# 225 municipalities
+
+# Pick n municipalities at random:
+n <- 44   # 20 % of total number of municipalities
+
+kommunenum_sel <- table(sf_all$kommunenum) |> names() |> sample(n)
+
+sf <- sf_all |> 
+  # filter(kommunenav == "Hammerfest") |> 
+  filter(kommunenum %in% kommunenum_sel) |> 
+  filter(!(grepl("Bru",objtype) | grepl("Havneomr",objtype) | grepl("Flytebrygge",objtype)))
+
+# plot(sf)
+
+# Find polygons sharing boundaries
+nb <- st_touches(sf)
+
+# Make 'cluster' for polygons sharing boundaries  
+g <- graph_from_adj_list(nb)
+sf$cluster <- components(g)$membership
+
+# The next step is a slow one
+# We use alternative 1, it seems faster
+
+# ALT 1. Dissolve by cluster using summarise()
+
+# may need to do this: install.packages("lwgeom")
+
+t0 <- Sys.time()
+sf2 <- sf |>
+  dplyr::group_by(cluster) |>
+  dplyr::summarise()
+t1 <- Sys.time()
+t1-t0  # for Hammerfest: 2.6 seconds
+
+# if polygons share borders but do not overlap (a coverage), is_coverage = true can
+# improve speed a lot:
+#  dplyr::summarise(is_coverage = true)
+# but they DO opverlap
+
+# ALT 2. Use st_union where only the geometric union is executed
+# turns out to be slower, see resukt for Hammerfest
+
+# t0 <- Sys.time()
+# clusters <- split(sf, sf$cluster)
+# sf2 <- do.call(
+#   rbind,
+#   lapply(names(clusters), function(cl) {
+#     st_sf(
+#       cluster = cl,
+#       geometry = st_union(clusters[[cl]])
+#     )
+#   })
+# )
+# t1 <- Sys.time()
+# t1-t0  # for Hammerfest: 4.6 seconds
+
+# ALT 2 -end
+
+sf2 <- sf2 |> 
+  mutate(
+    Shape_Area = st_area(geometry),
+    Shape_Leng = st_perimeter(geometry))
+    
+sf2$side_a <- side_a(sf2$Shape_Area, sf2$Shape_Leng) |> as.numeric()
+sf2$side_b <- side_b(sf2$Shape_Area, sf2$Shape_Leng) |> as.numeric()
+
+# sf clusters
+# plot(sf2)
+
+sf2$diameter <- sapply(st_geometry(sf2), get_diameter)
+
+```
+
+### Some plots 
 ```{r}
 
 
-dat_k <- dat_all %>% 
+ggplot(sf2, aes(diameter)) +
+  geom_histogram()
+
+ggplot(sf2, aes(side_a)) +
+  geom_histogram()
+
+ggplot(sf2 |> filter(as.numeric(Shape_Area) >= 10 & side_a < 5000), aes(diameter/side_a)) +
+  geom_histogram()
+
+```
+
+### Total length for sample and for Norway  
+```{r}
+
+cat("Total length in km (sample): ",
+    sum(sf2$diameter)/1000, "\n")
+# 555.8 for 20% av kommunene
+
+# Total length in km, only polygons > 50 m2
+cat("Total length in km, only polygons > 50 m2 (sample): ",
+    sum(sf2$diameter[as.numeric(sf2$Shape_Area) >= 50])/1000,
+    "\n")
+# 324.9 for 20%
+
+cat("Total length in km (Norway): ",
+    sum(sf2$diameter)/1000*5, "\n")
+# [1] 2779
+
+# Total length in km, only polygons > 50 m2
+cat("Total length in km, only polygons > 50 m2 (Norway): ",
+    sum(sf2$diameter[as.numeric(sf2$Shape_Area) >= 50])/1000*5,
+    "\n")
+# [1] 1624.5
+
+```
+
+## Combined length, flytebrygger   
+* Estimate using 40% of municipalities (ca. 2 minutes)
+
+```{r}
+# Connected components
+library(igraph)
+
+library(sf)
+sf_all <- sf::st_read("data/build_Construction_clip/build_Construction_clip.shp")
+table(sf_all$kommunenum) |> length()
+# 225 municipalities
+
+# Pick n municipalities at random:
+n <- 88   # 20 % of total number of municipalities
+
+kommunenum_sel <- table(sf_all$kommunenum) |> names() |> sample(n)
+
+sf <- sf_all |> 
+  # filter(kommunenav == "Hammerfest") |> 
+  filter(kommunenum %in% kommunenum_sel) |> 
+  filter(grepl("Flytebrygge",objtype))
+
+# plot(sf)
+
+# Find polygons sharing boundaries
+nb <- st_touches(sf)
+
+# Make 'cluster' for polygons sharing boundaries  
+g <- graph_from_adj_list(nb)
+sf$cluster <- components(g)$membership
+
+# The next step is a slow one
+# We use alternative 1, it seems faster
+
+# ALT 1. Dissolve by cluster using summarise()
+
+# may need to do this: install.packages("lwgeom")
+
+t0 <- Sys.time()
+sf2 <- sf |>
+  dplyr::group_by(cluster) |>
+  dplyr::summarise()
+t1 <- Sys.time()
+t1-t0  # for Hammerfest: 2.6 seconds
+
+# if polygons share borders but do not overlap (a coverage), is_coverage = true can
+# improve speed a lot:
+#  dplyr::summarise(is_coverage = true)
+# but they DO opverlap
+
+# ALT 2. Use st_union where only the geometric union is executed
+# turns out to be slower, see resukt for Hammerfest
+
+# t0 <- Sys.time()
+# clusters <- split(sf, sf$cluster)
+# sf2 <- do.call(
+#   rbind,
+#   lapply(names(clusters), function(cl) {
+#     st_sf(
+#       cluster = cl,
+#       geometry = st_union(clusters[[cl]])
+#     )
+#   })
+# )
+# t1 <- Sys.time()
+# t1-t0  # for Hammerfest: 4.6 seconds
+
+# ALT 2 -end
+
+sf2 <- sf2 |> 
+  mutate(
+    Shape_Area = st_area(geometry),
+    Shape_Leng = st_perimeter(geometry))
+    
+sf2$side_a <- side_a(sf2$Shape_Area, sf2$Shape_Leng) |> as.numeric()
+sf2$side_b <- side_b(sf2$Shape_Area, sf2$Shape_Leng) |> as.numeric()
+
+# sf clusters
+# plot(sf2)
+
+sf2$diameter <- sapply(st_geometry(sf2), get_diameter)
+
+cat("Total length of floating piers in km (Norway): ",
+    sum(sf2$diameter)/1000*2.5, "\n")
+# [1] 577
+
+```
+
+## Area distribution 
+
+### Quantiles  
+```{r}
+quantile(dat_sort$area, probs = c(0, 0.2, 0.5, 0.8, 1)) %>% round(1)
+quantile(dat_sort$cumularea, probs = c(0, 0.2, 0.5, 0.8, 1))
+```
+
+### Fraction of total area is coverd by areas > x  
+```{r}
+fractions <- c(0, 0.20, 0.40, 0.60, 0.80,1.00)
+purrr::map_dfr(
+  fractions,
+  \(fraq){
+    tot <- tail(dat_sort$cumularea,1)*fraq
+  dat_sel <- dat_sort %>% 
+    filter(cumularea < tot)  
+  tibble(
+    fraction_of_total_area = fraq,
+    n_polygons = nrow(dat_sel),
+    perc_polygons = n_polygons/nrow(dat_sort)*100,
+    areas_larger_than = tail(dat_sel$area, 1))
+  })
+  
+```
+
+
+## Stats by kommune  
+
+### Some stats for kommune features  
+```{r}
+
+ggplot(lookup_komm, aes(befolkning)) +
+  geom_histogram()
+lookup_komm %>% 
+  mutate(
+    storkommune = case_when(
+      befolkning >= 20000 ~ "Over 20000",
+      befolkning < 20000 ~ "Under 20000")) %>% 
+  count(storkommune)
+
+ggplot(lookup_cabins, aes(hytter_og_fritidsboliger)) +
+  geom_histogram()
+
+ggplot(lookup_work, aes(prosent_primærnaering)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(lookup_work, aes(prosent_industri)) +
+  geom_histogram(binwidth = 1)
+
+```
+
+### Make data for kommune level
+```{r}
+
+threshold_hytte <- 2500
+
+dat_k <- dat_sort %>% 
   group_by(
     kommunenum) %>% 
   summarise(
+    antall = n(),
     areal_dekar = sum(area)/1000) %>% 
   left_join(
     lookup_komm) %>% 
+  left_join(
+    lookup_cabins) %>% 
+  left_join(
+    lookup_work) %>% 
   arrange(
     desc(areal_dekar)) %>% 
   mutate(
     kommunenavn = fct_inorder(kommunenavn),
     storkommune = case_when(
-      befolkning >= 15000 ~ "Over 15000",
-      befolkning < 15000 ~ "Under 15000")
+      befolkning >= 20000 ~ "Over 20000",
+      befolkning < 20000 ~ "Under 20000"),
+    hytter_og_fritidsboliger_perinnb = hytter_og_fritidsboliger/befolkning,
+    hyttekommune = case_when(
+      hytter_og_fritidsboliger >= threshold_hytte ~ paste("Over", threshold_hytte, "hytter/fritidsbolig"),
+      hytter_og_fritidsboliger < threshold_hytte ~ paste("Under", threshold_hytte, "hytter/fritidsbolig")),
+    primaernaeringskommune = case_when(
+      prosent_primaernaering >= 10 ~ "Over 10% primaernaering",
+      prosent_primaernaering < 10 ~ "Under 10% primaernaering"),
+    industrikommune = case_when(
+      prosent_industri >= 10 ~ "Over 10% industri/anlegg",
+      prosent_industri < 10 ~ "Under 10% industri/anlegg")
   )
 
 ggplot(dat_k[1:50,], aes(kommunenavn, areal_dekar)) +
@@ -53,7 +798,213 @@ ggplot(dat_k[1:50,], aes(kommunenavn, areal_dekar)) +
   theme_bw() +
   easy_rotate_x_labels(angle = -45)
 
+```
+
+
+### Type of kommune - tables  
+```{r}
+
+dat_k %>% 
+  summarize(
+    `Antall kommuner` = n(),
+    `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(storkommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(primaernaeringskommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(industrikommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(hyttekommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
 
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+### Type of kommune - combination tables
+```{r}
+
+dat_k %>% 
+  group_by(storkommune,industrikommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    # `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(storkommune,industrikommune, hyttekommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    # `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(storkommune,industrikommune, hyttekommune, primaernaeringskommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    # `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+dat_k %>% 
+  group_by(industrikommune, primaernaeringskommune) %>%
+  summarize(
+    `Antall kommuner` = n(),
+    # `Antall inngrep` = sum(antall),
+    `Dekar inngrep` = sum(areal_dekar),
+    `Dekar per kommune` = `Dekar inngrep`/`Antall kommuner`)
+
+```
+
+## Maps  
+
+### Geodata  
+```{r}
+
+library(sf)
+library(leaflet)
+sf <- read_sf("data/deposition/deposition.shp")
+
+# Extract coordinates
+coord_utm <- st_coordinates(sf)
+sf_dat <- st_drop_geometry(sf) %>% 
+  bind_cols(as.data.frame(coord_utm))
+
+sf_datk <- sf_dat %>% 
+  filter(!objtype %in% c("Flytebrygge", "Bru", "Havneområde")) %>% 
+  group_by(fylkesnavn, kommunenum) %>% 
+  summarize(
+    area_dekar = sum(area)/1000,
+    X = weighted.mean(X, w=area),
+    Y = weighted.mean(Y, w=area))  %>% 
+  left_join(
+    lookup_komm) %>% 
+  left_join(
+    lookup_cabins) %>% 
+  left_join(
+    lookup_work) %>% 
+  mutate(
+    circle_size = sqrt(area_dekar/2))
+
+stem(sf_datk$circle_size)
+
+coord_latlon <- st_as_sf(sf_datk,
+                         coords = c("X", "Y"),
+                  	     crs = 6173) %>% 
+  st_transform(4326) %>% 
+  st_coordinates() %>% 
+  as.data.frame() %>% 
+  set_names(c("lng", "lat"))
+
+sf_datk <- sf_datk %>% 
+  bind_cols(coord_latlon)
+
+```
+
+### Leaflet  
+```{r}
+
+leaflet(sf_datk %>% filter(befolkning < 20000)) %>%
+  # leaflet::addTiles() %>%
+  addProviderTiles(providers$Stadia.AlidadeSatellite) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   color = "#99ccff", fillColor = "#99ccff",
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>befolkning: ", befolkning)) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>befolkning: ", befolkning), 
+                   color = "#ff1a1a", fillColor = "#ff1a1a", opacity = 0.8,
+                   data = sf_datk %>% filter(befolkning >= 20000))
+
+leaflet(sf_datk %>% filter(prosent_industri < 10)) %>%
+  # leaflet::addTiles() %>%
+  addProviderTiles(providers$Stadia.AlidadeSatellite) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   color = "#99ccff", fillColor = "#99ccff",
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_industri: ", round(prosent_industri,1))) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_industri: ", round(prosent_industri,1)), 
+                   color = "#ff1a1a", fillColor = "#ff1a1a", opacity = 0.8,
+                   data = sf_datk %>% filter(prosent_industri >= 10))
+
+treshhold <- 2500
+leaflet(sf_datk %>% filter(hytter_og_fritidsboliger < treshhold)) %>%
+  # leaflet::addTiles() %>%
+  addProviderTiles(providers$Stadia.AlidadeSatellite) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   color = "#99ccff", fillColor = "#99ccff",
+                   popup = ~paste0(kommunenavn,
+                                   "<br>hytter_og_fritidsboliger: ", hytter_og_fritidsboliger)) %>%
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   popup = ~paste0(kommunenavn,
+                                   "<br>hytter_og_fritidsboliger: ", hytter_og_fritidsboliger),
+                   color = "#ff1a1a", fillColor = "#ff1a1a", opacity = 0.8,
+                   data = sf_datk %>% filter(hytter_og_fritidsboliger >= treshhold))
+
+
+leaflet(sf_datk %>% filter(prosent_primaernaering < 10)) %>%
+  # leaflet::addTiles() %>%
+  addProviderTiles(providers$Stadia.AlidadeSatellite) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   color = "#99ccff", fillColor = "#99ccff",
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_primaernaering: ", round(prosent_primaernaering,1))) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_primaernaering: ", round(prosent_primaernaering,1)), 
+                   color = "#ff1a1a", fillColor = "#ff1a1a", opacity = 0.8,
+                   data = sf_datk %>% filter(prosent_primaernaering >= 10))
+
+
+```
+
+
+```{r}
+
+# 15 instead of 10
+leaflet(sf_datk %>% filter(prosent_industri < 15)) %>%
+  # leaflet::addTiles() %>%
+  addProviderTiles(providers$Stadia.AlidadeSatellite) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   color = "#99ccff", fillColor = "#99ccff",
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_industri: ", round(prosent_industri,1))) %>% 
+  addCircleMarkers(lng = ~lng, lat =  ~lat, radius = ~circle_size,
+                   popup = ~paste0(kommunenavn, 
+                                   "<br>prosent_industri: ", round(prosent_industri,1)), 
+                   color = "#ff1a1a", fillColor = "#ff1a1a", opacity = 0.8,
+                   data = sf_datk %>% filter(prosent_industri >= 15))
+
+```
+
+
